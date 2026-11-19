@@ -1,0 +1,149 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; LLM-based extension: for the Financial Support Network (FSN) model (Fuentes, Schmutzler, and Carreón Vázquez, 2026)  
+;; This file contains only the LLM-related procedures. It is not a standalone
+;; model and does not include or redistribute the original FSN implementation.
+;; See README.md for integration instructions and required model dependencies.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to mating-vc
+  if vc-selection = "traditional" [traditional-vc-selection]
+  if vc-selection = "prefered" [prefered-vc-selection]
+  if vc-selection = "LLM" [
+    if not python-ready? [ initialize-vc-python ]
+    llm-vc-selection
+  ]
+end
+
+to initialize-vc-python
+  ;; Same NetLogo-Python initialization pattern as CULTURE_rev3.
+  py:setup py:python3
+  py:run "import vc_brain"
+  py:run "vc_brain.reset_memory()"
+  set python-ready? true
+  print "VC LLM initialized. Investor memory cleared for this simulation run."
+end
+
+to llm-vc-selection
+  let awaiting-VC-set turtles with [want-vc = True and meeting = 1 and mating = 0 and d > 0]
+
+  if any? awaiting-VC-set [
+    ;; Refresh successful-neighbor information for all applicants.
+    ;; Historical VC-successful neighbors are kept separate from
+    ;; currently active VC ties in the information sent to the LLM.
+    ask awaiting-VC-set [
+      set my-alters_m count link-neighbors with [gender = 0 and selection2? = 1]
+      set my-alters_f count link-neighbors with [gender = 1 and selection2? = 1]
+      set my-alters_x count link-neighbors with [gender = 2 and selection2? = 1]
+      set social-net my-alters_m + my-alters_f + my-alters_x
+    ]
+
+    let candidate-packet make-vc-candidate-packet awaiting-VC-set
+    ;; Same exchange pattern as CULTURE_rev3: call Python through py:runresult.
+    ;; Candidate records contain only numeric/boolean fields, so the packet
+    ;; can safely be embedded as a Python string argument.
+    let selected-id py:runresult
+      (word "vc_brain.select_investment('" candidate-packet "', " ticks ")")
+
+    ;; -1 means a real Python/Ollama error; -2 means both LLM answers were invalid.
+    if selected-id = -1 [
+      let python-error py:runresult "vc_brain.last_error()"
+      error (word "VC LLM failed at tick " ticks ". Python/Ollama reports: " python-error)
+    ]
+
+    ;; If the LLM twice returns an unavailable ID, draw a fallback using NetLogo's
+    ;; seeded RNG (only on this exceptional path) and save that investment to VC memory.
+    if selected-id = -2 [
+      set selected-by-vc one-of awaiting-VC-set
+      set selected-id [who] of selected-by-vc
+      py:run (word "vc_brain.record_fallback('" candidate-packet "', " ticks ", " selected-id ")")
+      print (word "VC WARNING: tick " ticks
+        "; LLM returned invalid IDs twice; NetLogo selected eligible startup " selected-id
+        " through its seeded random generator.")
+    ]
+
+    print (word "VC LLM decision completed at tick " ticks
+      "; eligible candidates: " count awaiting-VC-set
+      "; decision seconds: " precision (py:runresult "vc_brain.last_duration()") 2)
+
+    ;; For ordinary LLM decisions, map the returned ID to its turtle.
+    ;; The fallback branch above already selected its turtle with one-of,
+    ;; so do not draw a second time from a singleton agentset.
+    if selected-id != -2 [
+      set selected-by-vc one-of (awaiting-VC-set with [who = selected-id])
+    ]
+    if selected-by-vc = nobody [
+      error (word "VC LLM returned an ID that is not in the current candidate set: " selected-id)
+    ]
+
+    ;; Apply the same funding amount, movement, gender counters, and
+    ;; cumulative totals used by the traditional and preferred mechanisms.
+    ask selected-by-vc [
+      set mating 140
+      set color green
+      set tie-vc True
+      set funds funds + 140
+      set selection2? 1
+
+      ifelse initial-state = 0 [
+        fd -30
+        if gender = 0 [set not-come-acc0 not-come-acc0 + 1]
+        if gender = 1 [set not-come-acc1 not-come-acc1 + 1]
+        if gender = 2 [set not-come-acc2 not-come-acc2 + 1]
+      ] [
+        fd -20
+        if gender = 0 [set come-acc0 come-acc0 + 1]
+        if gender = 1 [set come-acc1 come-acc1 + 1]
+        if gender = 2 [set come-acc2 come-acc2 + 1]
+      ]
+
+      if gender = 0 [set #male2 #male2 + 1]
+      if gender = 1 [set #female2 #female2 + 1]
+      if gender = 2 [set #mix2 #mix2 + 1]
+      set #total #total + 1
+      set want-vc False
+    ]
+
+    ask awaiting-VC-set with [self != selected-by-vc] [
+      set want-vc False
+      set selection2? -1
+    ]
+  ]
+end
+
+to-report make-vc-candidate-packet [candidate-set]
+  let packet ""
+  foreach sort candidate-set [candidate ->
+    let active-vc-neighbors [count link-neighbors with [tie-vc = True]] of candidate
+    let active-vc-male [count link-neighbors with [tie-vc = True and gender = 0]] of candidate
+    let active-vc-female [count link-neighbors with [tie-vc = True and gender = 1]] of candidate
+    let active-vc-mixed [count link-neighbors with [tie-vc = True and gender = 2]] of candidate
+
+    set packet (word packet
+      [who] of candidate "|"
+      [gender] of candidate "|"
+      [d] of candidate "|"
+      [funds] of candidate "|"
+      [social-net] of candidate "|"
+      [my-alters_m] of candidate "|"
+      [my-alters_f] of candidate "|"
+      [my-alters_x] of candidate "|"
+      [accelerated] of candidate "|"
+      [initial-state] of candidate "|"
+      [mating-acc] of candidate "|"
+      [accelerated-period] of candidate "|"
+      [tie-vc] of candidate "|"
+      [selection1?] of candidate "|"
+      [selection2?] of candidate "|"
+      [meeting] of candidate "|"
+      [mating] of candidate "|"
+      [meet_prob] of candidate "|"
+      [mat_prob] of candidate "|"
+      [want-acc] of candidate "|"
+      [want-vc] of candidate "|"
+      active-vc-neighbors "|"
+      active-vc-male "|"
+      active-vc-female "|"
+      active-vc-mixed ";")
+  ]
+  report packet
+end
